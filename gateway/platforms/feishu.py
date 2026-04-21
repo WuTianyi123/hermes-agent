@@ -126,7 +126,16 @@ _MARKDOWN_FENCE_OPEN_RE = re.compile(r"^```([^\n`]*)\s*$")
 _MARKDOWN_FENCE_CLOSE_RE = re.compile(r"^```\s*$")
 _MENTION_RE = re.compile(r"@_user_\d+")
 _MULTISPACE_RE = re.compile(r"[ \t]{2,}")
-_POST_CONTENT_INVALID_RE = re.compile(r"content format of the post type is incorrect", re.IGNORECASE)
+_POST_CONTENT_INVALID_RE = re.compile(
+    r"content format of the post type is incorrect|"
+    r"invalid post content|"
+    r"post content format error|"
+    r"msg_type invalid|"
+    r"消息类型不合法|"
+    r"content格式不正确|"
+    r"参数不合法",
+    re.IGNORECASE,
+)
 # ---------------------------------------------------------------------------
 # Media type sets and upload constants
 # ---------------------------------------------------------------------------
@@ -463,15 +472,20 @@ def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
     appears inside one large markdown element. Split the reply at real fence
     lines so prose before/after the code block remains visible while code stays
     in a dedicated row.
+
+    Uses fence char + length matching to avoid mis-interpreting inner fences
+    (e.g. a ``` line inside a `````` block is content, not a close fence).
     """
     if not content:
         return [[{"tag": "md", "text": ""}]]
-    if "```" not in content:
+    if "```" not in content and "~~~" not in content:
         return [[{"tag": "md", "text": content}]]
 
     rows: List[List[Dict[str, str]]] = []
     current: List[str] = []
     in_code_block = False
+    fence_char = ""  # '`' or '~'
+    fence_len = 0    # length of opening fence
 
     def _flush_current() -> None:
         nonlocal current
@@ -484,11 +498,22 @@ def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
 
     for raw_line in content.splitlines():
         stripped_line = raw_line.strip()
-        is_fence = bool(
-            _MARKDOWN_FENCE_CLOSE_RE.match(stripped_line)
-            if in_code_block
-            else _MARKDOWN_FENCE_OPEN_RE.match(stripped_line)
-        )
+        leading_spaces = len(raw_line) - len(raw_line.lstrip(" "))
+
+        is_fence = False
+        if in_code_block:
+            # Close fence: same char, same or longer length, indent <= 3
+            if leading_spaces <= 3:
+                m = re.match(rf"^({re.escape(fence_char)}{{3,}})\s*$", stripped_line)
+                if m and len(m.group(1)) >= fence_len:
+                    is_fence = True
+        else:
+            # Open fence: 3+ backticks or tildes, optional lang tag
+            m = re.match(r"^(```+|~~~+)([^`\n]*)\s*$", stripped_line)
+            if m:
+                is_fence = True
+                fence_char = m.group(1)[0]  # '`' or '~'
+                fence_len = len(m.group(1))
 
         if is_fence:
             if not in_code_block:
@@ -496,6 +521,8 @@ def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
             current.append(raw_line)
             in_code_block = not in_code_block
             if not in_code_block:
+                fence_char = ""
+                fence_len = 0
                 _flush_current()
             continue
 
